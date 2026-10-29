@@ -1,5 +1,4 @@
 name: Build DotBP Safari Extension
-
 on:
   workflow_dispatch:
   push:
@@ -9,9 +8,17 @@ jobs:
   build:
     runs-on: macos-14
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
+      # 1. Kiểm tra manifest.json tồn tại trực tiếp trong extension_src
+      - name: Verify manifest.json
+        run: |
+          if [ ! -f "extension_src/manifest.json" ]; then
+            echo "Error: manifest.json not found in extension_src"
+            exit 1
+          fi
+
+      # 2. Chuyển đổi Chrome Extension sang Safari Web Extension (chỉ iOS)
       - name: Convert Chrome Extension to Safari Web Extension
         run: |
           mkdir -p output
@@ -23,110 +30,72 @@ jobs:
             --no-open \
             --no-prompt
 
-          echo "=== converter output tree ==="
-          find output -maxdepth 4 \( -name "*.xcodeproj" -o -name "project.pbxproj" -o -name "*.xcworkspace" \) | sort
-          find output -type d | head -60
-
+      # 3. Build unsigned IPA với scheme và .app được tự động phát hiện
       - name: Build unsigned IPA
         run: |
-          set -euo pipefail
-
-          # Find the real project.pbxproj (not a dangling .xcodeproj folder)
-          PBXPROJ=$(find output -name "project.pbxproj" -type f | head -n 1)
-          if [ -z "$PBXPROJ" ]; then
-            echo "ERROR: project.pbxproj not found under output/"
-            find output -type f | head -80
+          set -e
+          # Tìm thư mục chứa file .xcodeproj
+          PROJECT_PATH=$(find output -name "*.xcodeproj" -maxdepth 2 -type d | head -n 1)
+          if [ -z "$PROJECT_PATH" ]; then
+            echo "Error: .xcodeproj not found in output"
             exit 1
           fi
-          echo "Found project.pbxproj: $PBXPROJ"
-
-          # .xcodeproj is the parent directory of project.pbxproj
-          PROJECT_FILE=$(dirname "$PBXPROJ")
-          PROJECT_DIR=$(dirname "$PROJECT_FILE")
-          echo "Project file (.xcodeproj): $PROJECT_FILE"
+          PROJECT_DIR=$(dirname "$PROJECT_PATH")
+          PROJECT_NAME=$(basename "$PROJECT_PATH" .xcodeproj)
           echo "Project directory: $PROJECT_DIR"
+          echo "Project name: $PROJECT_NAME"
 
           cd "$PROJECT_DIR"
 
-          # Sanity: must contain project.pbxproj
-          if [ ! -f "$PROJECT_FILE/project.pbxproj" ]; then
-            echo "ERROR: $PROJECT_FILE/project.pbxproj still missing after resolution"
-            ls -la "$PROJECT_FILE" || true
+          # Liệt kê scheme để debug
+          echo "Listing schemes..."
+          SCHEME_LIST=$(xcodebuild -list -project "$PROJECT_NAME.xcodeproj" 2>&1)
+          echo "$SCHEME_LIST"
+
+          # Tự động tìm scheme iOS (thường có hậu tố "(iOS)")
+          SCHEME=$(echo "$SCHEME_LIST" | grep -E '^\s+.*\(iOS\)' | head -n 1 | sed 's/^[[:space:]]*//')
+          if [ -z "$SCHEME" ]; then
+            echo "No scheme with (iOS) found, trying first available scheme..."
+            SCHEME=$(echo "$SCHEME_LIST" | grep -A 20 'Schemes:' | tail -n +2 | head -n 1 | sed 's/^[[:space:]]*//')
+          fi
+          if [ -z "$SCHEME" ]; then
+            echo "Error: No scheme found"
             exit 1
-          fi
-
-          echo "=== xcodebuild -list ==="
-          xcodebuild -list -project "$PROJECT_FILE"
-
-          # Resolve scheme (prefer non-test)
-          SCHEME=$(xcodebuild -list -project "$PROJECT_FILE" -json 2>/dev/null \
-            | python3 -c '
-import sys, json
-data = json.load(sys.stdin)
-schemes = data.get("project", {}).get("schemes", [])
-for s in schemes:
-    if s and "test" not in s.lower():
-        print(s)
-        break
-else:
-    if schemes:
-        print(schemes[0])
-' || true)
-
-          if [ -z "${SCHEME:-}" ]; then
-            SCHEME=$(xcodebuild -list -project "$PROJECT_FILE" 2>/dev/null \
-              | sed -n '/Schemes:/,/^$/p' \
-              | grep -v "Schemes:" \
-              | sed 's/^[[:space:]]*//' \
-              | grep -v '^$' \
-              | head -n 1)
-          fi
-
-          if [ -z "${SCHEME:-}" ]; then
-            # Last resort: use app name
-            SCHEME="DotBPExtension"
-            echo "WARNING: falling back to scheme name: $SCHEME"
           fi
           echo "Using scheme: $SCHEME"
 
-          # Unsigned Release build
+          # Build Release không ký (unsigned)
           xcodebuild clean build \
-            -project "$PROJECT_FILE" \
+            -project "$PROJECT_NAME.xcodeproj" \
             -scheme "$SCHEME" \
             -sdk iphoneos \
             -configuration Release \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            CODE_SIGN_ENTITLEMENTS="" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            DEVELOPMENT_TEAM="" \
             -derivedDataPath ./DerivedData
 
-          # Locate .app
-          APP_PATH=$(find ./DerivedData -path "*/Release-iphoneos/*.app" -type d | head -n 1)
+          # Tìm file .app trong DerivedData (ưu tiên Release-iphoneos)
+          echo "Searching for .app in DerivedData..."
+          APP_PATH=$(find ./DerivedData -name "*.app" -type d | head -n 1)
           if [ -z "$APP_PATH" ]; then
-            APP_PATH=$(find ./DerivedData -name "*.app" -type d | head -n 1)
-          fi
-          if [ -z "$APP_PATH" ]; then
+            echo "Warning: .app not found in DerivedData, falling back to project directory..."
             APP_PATH=$(find . -name "*.app" -type d | head -n 1)
           fi
           if [ -z "$APP_PATH" ]; then
-            echo "ERROR: no .app found after build"
-            find ./DerivedData -type d 2>/dev/null | head -100
+            echo "Error: .app not found anywhere"
             exit 1
           fi
           echo "Found .app at: $APP_PATH"
 
-          # Package IPA
+          # Đóng gói IPA
           rm -rf Payload
           mkdir -p Payload
-          cp -R "$APP_PATH" Payload/
-          zip -qry dotbp.ipa Payload
-          mv -f dotbp.ipa "$GITHUB_WORKSPACE/"
-          echo "IPA created: $GITHUB_WORKSPACE/dotbp.ipa"
-          ls -lh "$GITHUB_WORKSPACE/dotbp.ipa"
+          cp -r "$APP_PATH" Payload/
+          zip -r dotbp.ipa Payload
+          mv dotbp.ipa "$GITHUB_WORKSPACE/"
 
+      # 4. Upload artifact
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
