@@ -1,4 +1,4 @@
-name: dot for safari
+name: Build DotBP Safari Extension
 on:
   workflow_dispatch:
   push:
@@ -9,34 +9,95 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-      - name: Convert Chrome Extension
+
+      # 1. Kiểm tra manifest.json tồn tại trực tiếp trong extension_src
+      - name: Verify manifest.json
+        run: |
+          if [ ! -f "extension_src/manifest.json" ]; then
+            echo "Error: manifest.json not found in extension_src"
+            exit 1
+          fi
+
+      # 2. Chuyển đổi Chrome Extension sang Safari Web Extension (chỉ iOS)
+      - name: Convert Chrome Extension to Safari Web Extension
         run: |
           mkdir -p output
           xcrun safari-web-extension-converter extension_src \
             --ios-only \
             --project-location output \
-            --app-name "Dot BP Extension" \
+            --app-name "DotBPExtension" \
             --bundle-identifier "com.qhuy.dotbpforsafari" \
             --no-open \
             --no-prompt
+
+      # 3. Build unsigned IPA với scheme và .app được tự động phát hiện
       - name: Build unsigned IPA
         run: |
-          cd output/MyCustomExtension
+          set -e
+          # Tìm thư mục chứa file .xcodeproj
+          PROJECT_PATH=$(find output -name "*.xcodeproj" -maxdepth 2 -type d | head -n 1)
+          if [ -z "$PROJECT_PATH" ]; then
+            echo "Error: .xcodeproj not found in output"
+            exit 1
+          fi
+          PROJECT_DIR=$(dirname "$PROJECT_PATH")
+          PROJECT_NAME=$(basename "$PROJECT_PATH" .xcodeproj)
+          echo "Project directory: $PROJECT_DIR"
+          echo "Project name: $PROJECT_NAME"
+
+          cd "$PROJECT_DIR"
+
+          # Liệt kê scheme để debug
+          echo "Listing schemes..."
+          SCHEME_LIST=$(xcodebuild -list -project "$PROJECT_NAME.xcodeproj" 2>&1)
+          echo "$SCHEME_LIST"
+
+          # Tự động tìm scheme iOS (thường có hậu tố "(iOS)")
+          SCHEME=$(echo "$SCHEME_LIST" | grep -E '^\s+.*\(iOS\)' | head -n 1 | sed 's/^[[:space:]]*//')
+          if [ -z "$SCHEME" ]; then
+            echo "No scheme with (iOS) found, trying first available scheme..."
+            SCHEME=$(echo "$SCHEME_LIST" | grep -A 20 'Schemes:' | tail -n +2 | head -n 1 | sed 's/^[[:space:]]*//')
+          fi
+          if [ -z "$SCHEME" ]; then
+            echo "Error: No scheme found"
+            exit 1
+          fi
+          echo "Using scheme: $SCHEME"
+
+          # Build Release không ký (unsigned)
           xcodebuild clean build \
-            -project MyCustomExtension.xcodeproj \
-            -scheme "MyCustomExtension (iOS)" \
+            -project "$PROJECT_NAME.xcodeproj" \
+            -scheme "$SCHEME" \
+            -sdk iphoneos \
             -configuration Release \
-            -destination "generic/platform=iOS" \
-            -derivedDataPath ./DerivedData \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY=""
-          APP_PATH=$(find ./DerivedData/Build/Products/Release-iphoneos -name "*.app" | head -n 1)
+            CODE_SIGN_IDENTITY="" \
+            -derivedDataPath ./DerivedData
+
+          # Tìm file .app trong DerivedData (ưu tiên Release-iphoneos)
+          echo "Searching for .app in DerivedData..."
+          APP_PATH=$(find ./DerivedData -name "*.app" -type d | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "Warning: .app not found in DerivedData, falling back to project directory..."
+            APP_PATH=$(find . -name "*.app" -type d | head -n 1)
+          fi
+          if [ -z "$APP_PATH" ]; then
+            echo "Error: .app not found anywhere"
+            exit 1
+          fi
+          echo "Found .app at: $APP_PATH"
+
+          # Đóng gói IPA
+          rm -rf Payload
           mkdir -p Payload
           cp -r "$APP_PATH" Payload/
           zip -r dotbp.ipa Payload
-          mv dotbp.ipa $GITHUB_WORKSPACE/
-      - uses: actions/upload-artifact@v4
+          mv dotbp.ipa "$GITHUB_WORKSPACE/"
+
+      # 4. Upload artifact
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
         with:
           name: dot-extension
           path: dotbp.ipa
