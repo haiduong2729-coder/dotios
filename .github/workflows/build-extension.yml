@@ -1,4 +1,5 @@
-name: dot for safari
+name: Build DotBP Safari Extension
+
 on:
   workflow_dispatch:
   push:
@@ -8,8 +9,10 @@ jobs:
   build:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
-      - name: Convert Chrome Extension
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Convert Chrome Extension to Safari Web Extension
         run: |
           mkdir -p output
           xcrun safari-web-extension-converter extension_src \
@@ -19,35 +22,113 @@ jobs:
             --bundle-identifier "com.qhuy.dotbpforsafari" \
             --no-open \
             --no-prompt
+
+          echo "=== converter output tree ==="
+          find output -maxdepth 4 \( -name "*.xcodeproj" -o -name "project.pbxproj" -o -name "*.xcworkspace" \) | sort
+          find output -type d | head -60
+
       - name: Build unsigned IPA
         run: |
-          # Tự động tìm và di chuyển vào thư mục dự án Xcode bất kể tên thư mục là gì bên trong output
-          PROJECT_DIR=$(find output -name "*.xcodeproj" -maxdepth 2 | head -n 1 | xargs dirname)
-          echo "Entering project directory: $PROJECT_DIR"
-          cd "$PROJECT_DIR"
-          
-          PROJECT_FILE=$(ls *.xcodeproj | head -n 1)
-          echo "Found project file: $PROJECT_FILE"
+          set -euo pipefail
 
+          # Find the real project.pbxproj (not a dangling .xcodeproj folder)
+          PBXPROJ=$(find output -name "project.pbxproj" -type f | head -n 1)
+          if [ -z "$PBXPROJ" ]; then
+            echo "ERROR: project.pbxproj not found under output/"
+            find output -type f | head -80
+            exit 1
+          fi
+          echo "Found project.pbxproj: $PBXPROJ"
+
+          # .xcodeproj is the parent directory of project.pbxproj
+          PROJECT_FILE=$(dirname "$PBXPROJ")
+          PROJECT_DIR=$(dirname "$PROJECT_FILE")
+          echo "Project file (.xcodeproj): $PROJECT_FILE"
+          echo "Project directory: $PROJECT_DIR"
+
+          cd "$PROJECT_DIR"
+
+          # Sanity: must contain project.pbxproj
+          if [ ! -f "$PROJECT_FILE/project.pbxproj" ]; then
+            echo "ERROR: $PROJECT_FILE/project.pbxproj still missing after resolution"
+            ls -la "$PROJECT_FILE" || true
+            exit 1
+          fi
+
+          echo "=== xcodebuild -list ==="
+          xcodebuild -list -project "$PROJECT_FILE"
+
+          # Resolve scheme (prefer non-test)
+          SCHEME=$(xcodebuild -list -project "$PROJECT_FILE" -json 2>/dev/null \
+            | python3 -c '
+import sys, json
+data = json.load(sys.stdin)
+schemes = data.get("project", {}).get("schemes", [])
+for s in schemes:
+    if s and "test" not in s.lower():
+        print(s)
+        break
+else:
+    if schemes:
+        print(schemes[0])
+' || true)
+
+          if [ -z "${SCHEME:-}" ]; then
+            SCHEME=$(xcodebuild -list -project "$PROJECT_FILE" 2>/dev/null \
+              | sed -n '/Schemes:/,/^$/p' \
+              | grep -v "Schemes:" \
+              | sed 's/^[[:space:]]*//' \
+              | grep -v '^$' \
+              | head -n 1)
+          fi
+
+          if [ -z "${SCHEME:-}" ]; then
+            # Last resort: use app name
+            SCHEME="DotBPExtension"
+            echo "WARNING: falling back to scheme name: $SCHEME"
+          fi
+          echo "Using scheme: $SCHEME"
+
+          # Unsigned Release build
           xcodebuild clean build \
             -project "$PROJECT_FILE" \
+            -scheme "$SCHEME" \
             -sdk iphoneos \
             -configuration Release \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY=""
-            
-          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "*.app" | head -n 1)
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            DEVELOPMENT_TEAM="" \
+            -derivedDataPath ./DerivedData
+
+          # Locate .app
+          APP_PATH=$(find ./DerivedData -path "*/Release-iphoneos/*.app" -type d | head -n 1)
           if [ -z "$APP_PATH" ]; then
-            APP_PATH=$(find . -name "*.app" | head -n 1)
+            APP_PATH=$(find ./DerivedData -name "*.app" -type d | head -n 1)
           fi
-          
-          echo "Found app at: $APP_PATH"
+          if [ -z "$APP_PATH" ]; then
+            APP_PATH=$(find . -name "*.app" -type d | head -n 1)
+          fi
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: no .app found after build"
+            find ./DerivedData -type d 2>/dev/null | head -100
+            exit 1
+          fi
+          echo "Found .app at: $APP_PATH"
+
+          # Package IPA
+          rm -rf Payload
           mkdir -p Payload
-          cp -r "$APP_PATH" Payload/
-          zip -r dotbp.ipa Payload
-          mv dotbp.ipa $GITHUB_WORKSPACE/
-      - uses: actions/upload-artifact@v4
+          cp -R "$APP_PATH" Payload/
+          zip -qry dotbp.ipa Payload
+          mv -f dotbp.ipa "$GITHUB_WORKSPACE/"
+          echo "IPA created: $GITHUB_WORKSPACE/dotbp.ipa"
+          ls -lh "$GITHUB_WORKSPACE/dotbp.ipa"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
         with:
           name: dot-extension
           path: dotbp.ipa
