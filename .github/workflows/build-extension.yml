@@ -21,16 +21,24 @@ jobs:
             --no-prompt
       - name: Build unsigned IPA
         run: |
-          cd "output/DotBPExtension"
+          cd output/DotBPExtension
+          # Tự động tìm tên scheme hợp lệ trong dự án để không bị lỗi
+          SCHEME_NAME=$(xcodebuild -list -json | tr -d '\n' | grep -o '"schemes":\[[^]]*\]' | grep -o '"[^"]*\(iOS\)[^"]*"' | tr -d '"' | head -n 1)
+          if [ -z "$SCHEME_NAME" ]; then
+            SCHEME_NAME="DotBPExtension (iOS)"
+          fi
+          echo "Using scheme: $SCHEME_NAME"
+
           xcodebuild clean build \
             -project "DotBPExtension.xcodeproj" \
-            -scheme "DotBPExtension (iOS)" \
+            -scheme "$SCHEME_NAME" \
             -configuration Release \
             -destination "generic/platform=iOS" \
             -derivedDataPath ./DerivedData \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
+            
           APP_PATH=$(find ./DerivedData/Build/Products/Release-iphoneos -name "*.app" | head -n 1)
           mkdir -p Payload
           cp -r "$APP_PATH" Payload/
