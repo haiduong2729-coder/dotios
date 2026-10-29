@@ -22,24 +22,26 @@ jobs:
       - name: Build unsigned IPA
         run: |
           cd output/DotBPExtension
-          # Tự động tìm tên scheme hợp lệ trong dự án để không bị lỗi
-          SCHEME_NAME=$(xcodebuild -list -json | tr -d '\n' | grep -o '"schemes":\[[^]]*\]' | grep -o '"[^"]*\(iOS\)[^"]*"' | tr -d '"' | head -n 1)
-          if [ -z "$SCHEME_NAME" ]; then
-            SCHEME_NAME="DotBPExtension (iOS)"
-          fi
-          echo "Using scheme: $SCHEME_NAME"
+          
+          # Tìm file .xcodeproj bất kỳ có trong thư mục hiện tại để build
+          PROJECT_FILE=$(ls *.xcodeproj | head -n 1)
+          echo "Found project: $PROJECT_FILE"
 
+          # Tiến hành build tự động target iOS đầu tiên tìm thấy
           xcodebuild clean build \
-            -project "DotBPExtension.xcodeproj" \
-            -scheme "$SCHEME_NAME" \
+            -project "$PROJECT_FILE" \
+            -sdk iphoneos \
             -configuration Release \
-            -destination "generic/platform=iOS" \
-            -derivedDataPath ./DerivedData \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
             
-          APP_PATH=$(find ./DerivedData/Build/Products/Release-iphoneos -name "*.app" | head -n 1)
+          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "*.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            APP_PATH=$(find . -name "*.app" | head -n 1)
+          fi
+          
+          echo "Found app at: $APP_PATH"
           mkdir -p Payload
           cp -r "$APP_PATH" Payload/
           zip -r dotbp.ipa Payload
