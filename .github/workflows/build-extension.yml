@@ -1,4 +1,5 @@
-name: Build DotBP Safari Extension
+name: Build DotBP Safari Extension (iOS)
+
 on:
   workflow_dispatch:
   push:
@@ -8,63 +9,77 @@ jobs:
   build:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      # 1. Kiểm tra manifest.json tồn tại trực tiếp trong extension_src
+      # 1. Kiểm tra manifest.json
       - name: Verify manifest.json
         run: |
           if [ ! -f "extension_src/manifest.json" ]; then
-            echo "Error: manifest.json not found in extension_src"
+            echo "❌ Error: manifest.json not found in extension_src/"
             exit 1
           fi
+          echo "✅ Found extension_src/manifest.json"
 
-      # 2. Chuyển đổi Chrome Extension sang Safari Web Extension (chỉ iOS)
-      - name: Convert Chrome Extension to Safari Web Extension
+      # 2. Convert Chrome/Web Extension → Safari Web Extension (iOS only)
+      - name: Convert to Safari Web Extension (iOS)
         run: |
           mkdir -p output
-          xcrun safari-web-extension-converter extension_src \
+
+          xcrun safari-web-extension-packager extension_src \
             --ios-only \
             --project-location output \
             --app-name "DotBPExtension" \
             --bundle-identifier "com.qhuy.dotbpforsafari" \
+            --copy-resources \
             --no-open \
-            --no-prompt
+            --no-prompt \
+            --force
 
-      # 3. Build unsigned IPA với scheme và .app được tự động phát hiện
+          echo "✅ Conversion completed"
+
+      # 3. Build unsigned IPA
       - name: Build unsigned IPA
         run: |
           set -e
-          # Tìm thư mục chứa file .xcodeproj
-          PROJECT_PATH=$(find output -name "*.xcodeproj" -maxdepth 2 -type d | head -n 1)
+
+          # Tìm .xcodeproj
+          PROJECT_PATH=$(find output -name "*.xcodeproj" -maxdepth 3 -type d | head -n 1)
           if [ -z "$PROJECT_PATH" ]; then
-            echo "Error: .xcodeproj not found in output"
+            echo "❌ Error: .xcodeproj not found"
+            find output -type d | head -20
             exit 1
           fi
+
           PROJECT_DIR=$(dirname "$PROJECT_PATH")
           PROJECT_NAME=$(basename "$PROJECT_PATH" .xcodeproj)
-          echo "Project directory: $PROJECT_DIR"
-          echo "Project name: $PROJECT_NAME"
+
+          echo "📁 Project dir: $PROJECT_DIR"
+          echo "📦 Project name: $PROJECT_NAME"
 
           cd "$PROJECT_DIR"
 
-          # Liệt kê scheme để debug
-          echo "Listing schemes..."
-          SCHEME_LIST=$(xcodebuild -list -project "$PROJECT_NAME.xcodeproj" 2>&1)
-          echo "$SCHEME_LIST"
+          # List schemes để debug
+          echo "=== Available schemes ==="
+          xcodebuild -list -project "$PROJECT_NAME.xcodeproj" || true
 
-          # Tự động tìm scheme iOS (thường có hậu tố "(iOS)")
+          # Tự động chọn scheme iOS
+          SCHEME_LIST=$(xcodebuild -list -project "$PROJECT_NAME.xcodeproj" 2>&1)
           SCHEME=$(echo "$SCHEME_LIST" | grep -E '^\s+.*\(iOS\)' | head -n 1 | sed 's/^[[:space:]]*//')
+
           if [ -z "$SCHEME" ]; then
-            echo "No scheme with (iOS) found, trying first available scheme..."
-            SCHEME=$(echo "$SCHEME_LIST" | grep -A 20 'Schemes:' | tail -n +2 | head -n 1 | sed 's/^[[:space:]]*//')
+            echo "⚠️  No scheme with (iOS) found, trying first available scheme..."
+            SCHEME=$(echo "$SCHEME_LIST" | grep -A 30 'Schemes:' | tail -n +2 | head -n 1 | sed 's/^[[:space:]]*//' | sed 's/ (.*)//')
           fi
+
           if [ -z "$SCHEME" ]; then
-            echo "Error: No scheme found"
+            echo "❌ Error: No scheme found"
             exit 1
           fi
-          echo "Using scheme: $SCHEME"
 
-          # Build Release không ký (unsigned)
+          echo "🎯 Using scheme: $SCHEME"
+
+          # Build Release unsigned
           xcodebuild clean build \
             -project "$PROJECT_NAME.xcodeproj" \
             -scheme "$SCHEME" \
@@ -75,29 +90,36 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             -derivedDataPath ./DerivedData
 
-          # Tìm file .app trong DerivedData (ưu tiên Release-iphoneos)
-          echo "Searching for .app in DerivedData..."
-          APP_PATH=$(find ./DerivedData -name "*.app" -type d | head -n 1)
+          # Tìm .app (ưu tiên Release-iphoneos)
+          echo "🔍 Searching for .app..."
+          APP_PATH=$(find ./DerivedData -path "*/Release-iphoneos/*.app" -type d | head -n 1)
+
           if [ -z "$APP_PATH" ]; then
-            echo "Warning: .app not found in DerivedData, falling back to project directory..."
-            APP_PATH=$(find . -name "*.app" -type d | head -n 1)
+            APP_PATH=$(find ./DerivedData -name "*.app" -type d | head -n 1)
           fi
+
           if [ -z "$APP_PATH" ]; then
-            echo "Error: .app not found anywhere"
+            echo "❌ Error: .app not found"
+            find ./DerivedData -type d -name "*.app" || true
             exit 1
           fi
-          echo "Found .app at: $APP_PATH"
+
+          echo "✅ Found .app at: $APP_PATH"
 
           # Đóng gói IPA
           rm -rf Payload
           mkdir -p Payload
-          cp -r "$APP_PATH" Payload/
-          zip -r dotbp.ipa Payload
-          mv dotbp.ipa "$GITHUB_WORKSPACE/"
+          cp -R "$APP_PATH" Payload/
+          zip -r DotBPExtension.ipa Payload
+          mv DotBPExtension.ipa "$GITHUB_WORKSPACE/"
+
+          echo "✅ IPA created: DotBPExtension.ipa"
+          ls -lh "$GITHUB_WORKSPACE/DotBPExtension.ipa"
 
       # 4. Upload artifact
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: dot-extension
-          path: dotbp.ipa
+          name: DotBP-Safari-Extension-iOS
+          path: DotBPExtension.ipa
+          retention-days: 30
