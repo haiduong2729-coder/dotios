@@ -1,0 +1,42 @@
+name: dot for safari
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Convert Chrome Extension
+        run: |
+          mkdir -p output
+          xcrun safari-web-extension-converter extension_src \
+            --ios-only \
+            --project-location output \
+            --app-name "DotBPExtension" \
+            --bundle-identifier "com.qhuy.dotbpforsafari" \
+            --no-open \
+            --no-prompt
+      - name: Build unsigned IPA
+        run: |
+          cd "output/DotBPExtension"
+          xcodebuild clean build \
+            -project "DotBPExtension.xcodeproj" \
+            -scheme "DotBPExtension (iOS)" \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath ./DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+          APP_PATH=$(find ./DerivedData/Build/Products/Release-iphoneos -name "*.app" | head -n 1)
+          mkdir -p Payload
+          cp -r "$APP_PATH" Payload/
+          zip -r dotbp.ipa Payload
+          mv dotbp.ipa $GITHUB_WORKSPACE/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dot-extension
+          path: dotbp.ipa
