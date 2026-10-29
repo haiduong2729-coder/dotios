@@ -21,13 +21,14 @@ jobs:
             --no-prompt
       - name: Build unsigned IPA
         run: |
-          cd output/DotBPExtension
+          # Tự động tìm và di chuyển vào thư mục dự án Xcode bất kể tên thư mục là gì bên trong output
+          PROJECT_DIR=$(find output -name "*.xcodeproj" -maxdepth 2 | head -n 1 | xargs dirname)
+          echo "Entering project directory: $PROJECT_DIR"
+          cd "$PROJECT_DIR"
           
-          # Tìm file .xcodeproj bất kỳ có trong thư mục hiện tại để build
           PROJECT_FILE=$(ls *.xcodeproj | head -n 1)
-          echo "Found project: $PROJECT_FILE"
+          echo "Found project file: $PROJECT_FILE"
 
-          # Tiến hành build tự động target iOS đầu tiên tìm thấy
           xcodebuild clean build \
             -project "$PROJECT_FILE" \
             -sdk iphoneos \
